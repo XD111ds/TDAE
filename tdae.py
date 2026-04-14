@@ -121,37 +121,43 @@ FUNCTION getAvgGrad(x_adv, delta, c_o, i):
 # Output:  x_adv_final
 # ─────────────────────────────────────────────────────────────────────────────
 
-FUNCTION TDAE_PhotoGD(x0, unet, vae, c_o, scheduler):
+FUNCTION TDAE(x0, c):
 
-    delta ← zeros_like(x0)          # initialize perturbation to zero
+    δv ← 0
+    δp ← 0
+    ximu ← x0
 
-    FOR i in 1 .. N:                 # N = 100 outer iterations
+    FOR n in 1 .. N:
 
-        # ── STEP 1: first gradient estimate ─────────────────────────────────
-        x_adv  ← clamp(x0 + delta, 0, 1)
-        grad1  ← getAvgGrad(x_adv, delta, c_o, i)
+        e ← c + δp
 
-        # preliminary normalized step (L2 normalization, not sign)
-        delta  ← delta + 0.05 * grad1 / ||grad1||_2
+        # ---- DPD: periodically update text perturbation ----
+        IF n % S == 0:
+            δp ← 0
+            FOR m in 1 .. M_dpd:
+                e_dpd   ← c + δp
+                L_dpd   ← Loss(x0 + δv, e_dpd)         # or ximu
+                g_p     ← ∂L_dpd / ∂δp
+                δp      ← δp - η * sign(g_p)
+                δp      ← project_Linf(δp, ϵp)
+            END FOR
+            e ← c + δp
+        END IF
 
-        # project and clamp
-        delta  ← clamp(delta, -eps_img, eps_img)
-        delta  ← clamp(x0 + delta, 0, 1) - x0
-        delta  ← clamp(delta, -eps_img, eps_img)
+        # ---- FDM on image perturbation ----
+        L1, g1 ← LossAndGrad(δv, e)                    # at current point
+        s      ← g1 / ||g1||_2
+        δv'    ← δv + h * s
 
-        # ── STEP 2: second gradient estimate after preliminary update ────────
-        x_adv  ← clamp(x0 + delta, 0, 1)
-        grad2  ← getAvgGrad(x_adv, delta, c_o, i)
+        L2, g2 ← LossAndGrad(δv', e)                   # at perturbed point
 
-        # ── STEP 3: momentum-weighted final update ───────────────────────────
-        grad   ← a * grad1 + (1 - a) * grad2    # a = 0.7
+        z      ← L2 - L1
+        gFDM   ← -g1 + (λ / h) * sign(z) * (g2 - g1)
 
-        delta  ← delta - alpha * sign(grad)      # alpha = 0.005
+        δv     ← δv - α * sign(gFDM)
+        δv     ← project_Linf(δv, ϵv)
+        δv     ← clamp(x0 + δv, 0, 1) - x0
 
-        # project and clamp
-        delta  ← clamp(delta, -eps_img, eps_img)
-        delta  ← clamp(x0 + delta, 0, 1) - x0
-        delta  ← clamp(delta, -eps_img, eps_img)
+        ximu   ← x0 + δv
 
-    x_adv_final ← clamp(x0 + delta, 0, 1)
-    RETURN x_adv_final
+    RETURN x0 + δv
